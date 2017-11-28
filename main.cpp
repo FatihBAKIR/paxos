@@ -1,42 +1,37 @@
 #include <iostream>
 #include <rpc/server.h>
 #include <rpc/client.h>
+#include <rpc/this_handler.h>
+#include <rpc/this_server.h>
+#include <rpc/this_session.h>
 #include <memory>
 
-namespace paxos
-{
-    struct ballot
-    {
+namespace paxos {
+    struct ballot {
         int number;
         int node_id;
     };
 
-    struct value
-    {
-
+    struct value {
     };
 
-    struct promise
-    {
-        ballot  bal;
-        ballot  accept_num;
-        value   accept_val;
+    struct promise {
+        ballot bal;
+        ballot accept_num;
+        value accept_val;
     };
 
-    struct ticket_sell
-    {
+    struct ticket_sell {
         int client_id;
         int ticket_id;
     };
 
-    struct config_chg
-    {
+    struct config_chg {
         int new_node1;
         int new_node2;
     };
 
-    struct log_entry
-    {
+    struct log_entry {
         int type;
         union {
             ticket_sell ts;
@@ -44,8 +39,7 @@ namespace paxos
         };
     };
 
-    struct persist
-    {
+    struct persist {
         int remaining_tickets;
         std::vector<log_entry> log;
     };
@@ -53,68 +47,53 @@ namespace paxos
 
 class remote_end;
 
-class local_end
-{
-    std::map<int, remote_end*> m_conns;
-    rpc::server m_server;
-    paxos::persist m_state;
-
+class local_end {
 public:
-
     local_end() :
-            m_server(8080)
-    {
-        m_server.bind("init_conn", [](int node){
-            //std::this_thread::sleep_for(std::chrono::seconds(10));
+            m_server(8080) {
+        m_server.bind("init_conn", [](int node) {
             std::cout << "Got connection from " << node << "\n";
-            return false;
+            return true;
         });
+        m_server.suppress_exceptions(true);
         m_server.async_run(1);
     }
 
+private:
+    std::map<int, remote_end *> m_conns;
+    rpc::server m_server;
+    paxos::persist m_state;
+
+
 };
 
-class remote_end
-{
+class remote_end {
     rpc::client m_c;
 
 public:
 
-    remote_end(const std::string& host, int port) :
-        m_c(host, port) {
+    remote_end(const std::string &host, int port) :
+            m_c(host, port) {
         m_c.set_timeout(5000);
-        //m_c.call("init_conn");
-        /*auto state = m_c.async_reconnect();
-        auto stat = state.wait_for(std::chrono::seconds(5));
-
-        if (stat == std::future_status::timeout)
-        {
-            throw std::runtime_error("conn err");
-        }*/
     }
 
     std::future<void>
-    initiate(int node_id)
-    {
+    initiate(int node_id) {
         auto p = std::make_shared<std::promise<void>>();
         auto res = p->get_future();
 
-        std::async([p, fut = m_c.async_call("init_conn", node_id)]() mutable {
-            auto r = fut.get().as<bool>();
-            if (r)
-            {
-                p->set_value();
-            }
-            else
-            {
-                try
-                {
+        std::async(std::launch::async, [p, fut = m_c.async_call("init_conn", node_id)]() mutable {
+            try {
+                auto r = fut.get().as<bool>();
+                if (r) {
+                    p->set_value();
+                } else {
                     throw std::runtime_error("err");
                 }
-                catch(std::exception& e)
-                {
-                    p->set_exception(std::current_exception());
-                }
+            }
+            catch (std::exception &e) {
+                std::cout << "holy shit\n";
+                p->set_exception(std::current_exception());
             }
         });
 
@@ -122,8 +101,7 @@ public:
     }
 
     std::future<paxos::promise>
-    prepare(paxos::ballot b)
-    {
+    prepare(paxos::ballot b) {
         auto p = std::promise<paxos::promise>{};
         auto res = p.get_future();
         auto fut = m_c.async_call("prepare", b.node_id, b.number);
@@ -132,8 +110,7 @@ public:
     }
 };
 
-int main()
-{
+int main() {
     local_end l;
 
     remote_end r("localhost", 8080);
