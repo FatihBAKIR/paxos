@@ -4,8 +4,10 @@
 #include <rpc/this_handler.h>
 #include <rpc/this_server.h>
 #include <rpc/this_session.h>
+#include <rpc/rpc_error.h>
 #include <memory>
 #include <boost/optional.hpp>
+#include <boost/utility/string_view.hpp>
 
 namespace paxos {
     struct ballot {
@@ -57,61 +59,6 @@ namespace paxos {
 
 class remote_end;
 
-class local_end {
-
-    paxos::promise prepare(paxos::ballot bal)
-    {
-        if (bal.number >= m_cur_bal.number)
-        {
-            m_cur_bal = bal;
-        }
-        return { bal, m_cur_bal, m_val };
-    }
-
-    bool accept(paxos::ballot bal, paxos::value val)
-    {
-        if (bal.number >= m_cur_bal.number)
-        {
-            m_cur_bal = bal;
-            m_val = val;
-            return true;
-        }
-        return false;
-    }
-
-    void inform(paxos::value val)
-    {
-    }
-
-public:
-    local_end(int port) :
-            m_server(port)
-    {
-        m_server.bind("heartbeat", [this](int node) {
-            std::cout << "Got heartbeat from " << node << "\n";
-            return true;
-        });
-
-        m_server.bind("prepare", [this](paxos::ballot bal) {
-            return prepare(bal);
-        });
-
-        m_server.bind("accept", [this](paxos::ballot bal, paxos::value val){
-            return accept(bal, val);
-        });
-
-        m_server.suppress_exceptions(true);
-        m_server.async_run(1);
-    }
-
-private:
-    std::map<int, remote_end *> m_conns;
-    rpc::server m_server;
-    paxos::persist m_state;
-    paxos::ballot m_cur_bal = { -1, -1 };
-    paxos::value m_val;
-};
-
 class remote_end {
     rpc::client m_c;
     std::mutex m_call_prot;
@@ -124,8 +71,8 @@ class remote_end {
     }
 
 public:
-    remote_end(const std::string &host, int port) :
-            m_c(host, port) {
+    remote_end(boost::string_view host, int port) :
+            m_c(std::string(host), port) {
         m_c.set_timeout(5000);
     }
 
@@ -192,29 +139,141 @@ public:
     }
 };
 
+class local_end {
+
+
+public:
+    using clock = std::chrono::high_resolution_clock;
+    explicit local_end(uint16_t port) :
+            m_server(port)
+    {
+        m_server.bind("heartbeat", [this](int node) {
+            std::cout << "Got heartbeat from " << node << "\n";
+            if (node == m_curr_leader)
+            {
+                m_last_hb = clock::now();
+            }
+            return true;
+        });
+
+        m_server.bind("prepare", [this](paxos::ballot bal) {
+            return prepare(bal);
+        });
+
+        m_server.bind("accept", [this](paxos::ballot bal, paxos::value val){
+            return accept(bal, val);
+        });
+
+        m_server.suppress_exceptions(true);
+        m_server.async_run(1);
+    }
+
+    void add_endpoint(uint8_t node_id, boost::string_view host, uint16_t port)
+    {
+        auto it = m_conns.find(node_id);
+        if (it != m_conns.end())
+        {
+            // already exists, return
+            return;
+        }
+        m_conns.emplace(node_id, new remote_end(host, port));
+    }
+
+    paxos::ballot phase_one()
+    {
+        using namespace paxos;
+        using namespace std;
+        vector<future<paxos::promise>> futs;
+
+        m_cur_bal.number++;
+        paxos::ballot b = m_cur_bal;
+        b.node_id = m_node_id;
+
+        for (auto& remotes : m_conns)
+        {
+            futs.emplace_back(remotes.second->prepare(b));
+        }
+
+        vector<paxos::promise> proms;
+
+        for (auto& fut : futs)
+        {
+            try
+            {
+                proms.push_back(fut.get());
+            }
+            catch (rpc::timeout& err)
+            {
+                cerr << err.what() << '\n';
+                // swallow timeouts
+            }
+        }
+
+        if ((proms.size() + 1) > (m_conns.size() + 1) / 2)
+        {
+            // done
+            return b;
+        }
+
+        return {};
+    }
+
+    remote_end* get_leader()
+    {
+        if (clock::now() - m_last_hb > std::chrono::seconds(1) || m_curr_leader == 0xFF)
+        {
+            return nullptr;
+        }
+        return m_conns[m_curr_leader];
+    }
+
+private:
+
+    paxos::promise prepare(paxos::ballot bal)
+    {
+        if (bal.number >= m_cur_bal.number)
+        {
+            m_cur_bal = bal;
+        }
+        return { bal, m_cur_bal, m_val };
+    }
+
+    bool accept(paxos::ballot bal, paxos::value val)
+    {
+        if (bal.number >= m_cur_bal.number)
+        {
+            m_cur_bal = bal;
+            m_val = val;
+            return true;
+        }
+        return false;
+    }
+
+    std::map<uint8_t, remote_end *> m_conns;
+    clock::time_point m_last_hb;
+    uint8_t m_curr_leader = 0xFF;
+
+    rpc::server m_server;
+    paxos::persist m_state;
+    paxos::ballot m_cur_bal = { 0, -1 };
+    paxos::value m_val;
+    uint8_t m_node_id = 0;
+};
+
 int main() {
     local_end l(8080);
     local_end l1(8081);
     local_end l2(8082);
     local_end l3(8083);
-    //local_end l5(8084);
+    local_end l5(8084);
 
-    remote_end r("localhost", 8080);
-    remote_end r1("localhost", 8081);
-    remote_end r2("localhost", 8082);
-    remote_end r3("localhost", 8083);
-    //remote_end r4("localhost", 8084);
+    l5.add_endpoint(1, "localhost", 8080);
+    l5.add_endpoint(2, "localhost", 8081);
+    l5.add_endpoint(3, "localhost", 8082);
+    l5.add_endpoint(4, "localhost", 8083);
 
-
-    auto prom = r.prepare(paxos::ballot{ 10, 0 });
-    auto prom1 = r1.prepare(paxos::ballot{ 10, 0 });
-    auto prom2 = r2.prepare(paxos::ballot{ 10, 0 });
-    auto prom3 = r3.prepare(paxos::ballot{ 10, 0 });
-
-    auto a = prom.get();
-    auto a1 = prom1.get();
-    auto a2 = prom2.get();
-    auto a3 = prom3.get();
+    auto p1res = l5.phase_one();
+    auto p1res_1 = l5.phase_one();
 
     //auto res = r.accept(paxos::ballot{ 10, 0 }, paxos::value{ 'c' }).get();
 
