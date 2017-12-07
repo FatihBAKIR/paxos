@@ -18,3 +18,5 @@ endif()
 find_package(TBB REQUIRED)
 target_include_directories(paxos PUBLIC ${TBB_INCLUDE_DIR})
 target_link_libraries(paxos PUBLIC tbb ${TBB_LIBRARY})
+
+target_link_libraries(paxos PUBLIC -static-libstdc++ -static-libgcc)
