@@ -1,0 +1,25 @@
+{
+  "nodes":
+  [
+    {
+      "ip": "localhost",
+      "port": 8080
+    },
+    {
+      "ip": "localhost",
+      "port": 8081
+    },
+    {
+      "ip": "localhost",
+      "port": 8082
+    },
+    {
+      "ip": "localhost",
+      "port": 8083
+    },
+    {
+      "ip": "localhost",
+      "port": 8085
+    }
+  ]
+}
